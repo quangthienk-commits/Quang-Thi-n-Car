@@ -16,8 +16,8 @@ permissions:
 jobs:
   build-debug-apk:
     name: Build Debug APK
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -28,11 +28,35 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Install Android SDK
-        uses: android-actions/setup-android@v3
+      # GitHub-hosted Ubuntu runners come with Android command-line tools.
+      # Avoid android-actions/setup-android@v3 (the failing step in the prior workflow).
+      - name: Locate preinstalled Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          if [[ -x "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]]; then
+            SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          else
+            SDKMANAGER="$(command -v sdkmanager || true)"
+          fi
+          if [[ -z "$SDKMANAGER" ]]; then
+            echo 'Android sdkmanager was not found on the GitHub runner' >&2
+            exit 1
+          fi
+          echo "QT_SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
+          echo "Using Android SDK: $SDK_ROOT"
+          "$SDKMANAGER" --version
 
-      - name: Install Android SDK Platform 35
-        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0' 'platform-tools'
+      - name: Install required SDK components
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | "$QT_SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses > /dev/null || true
+          "$QT_SDKMANAGER" --sdk_root="$ANDROID_HOME" --install 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0'
+          test -f "$ANDROID_HOME/platforms/android-35/android.jar"
 
       - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
@@ -40,9 +64,11 @@ jobs:
           gradle-version: '8.9'
 
       - name: Compile Android Debug APK
+        shell: bash
         run: gradle --no-daemon --stacktrace :app:assembleDebug
 
       - name: Verify APK exists
+        shell: bash
         run: test -s app/build/outputs/apk/debug/app-debug.apk
 
       - name: Upload installable APK
